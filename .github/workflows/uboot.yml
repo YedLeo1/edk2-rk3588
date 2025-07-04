@@ -6,13 +6,11 @@ on:
       uboot-url:
         description: "URL to U-Boot image"
         required: true
-        default: "https://example.com/path/to/uboot.img"
+        default: "http://file.4d.ink/d/Share/iFLYTEK/ROMs%20and%20GSIs/uboot.img"
 jobs:
   disassemble:
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
       
     - name: Setup environment
       run: |
