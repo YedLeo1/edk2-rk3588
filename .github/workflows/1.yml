@@ -1,0 +1,121 @@
+name: Build-test
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        PLATFORM: [roc-rk3588s-pc]
+        CONFIGURATION: ${{ fromJSON(format('[{0}]', inputs.build-configs || '"Debug"')) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 0  # 获取完整提交历史
+
+      - name: Cache EDK2 build
+        uses: actions/cache@v4
+        id: cache-edk2
+        with:
+          path: |
+            edk2/Build
+            edk2/BaseTools/Bin
+          key: edk2-${{ runner.os }}-${{ hashFiles('**/edk2/**') }}
+          restore-keys: |
+            edk2-${{ runner.os }}-
+
+      - name: Cache EDK2 Platforms
+        uses: actions/cache@v4
+        id: cache-edk2-platforms
+        with:
+          path: edk2-platforms
+          key: edk2-platforms-${{ runner.os }}-${{ hashFiles('.gitmodules') }}
+          restore-keys: |
+            edk2-platforms-${{ runner.os }}-
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          sudo apt-get update && \
+          sudo apt-get install -y \
+          acpica-tools \
+          binutils-aarch64-linux-gnu \
+          build-essential \
+          device-tree-compiler \
+          gettext \
+          git \
+          gcc-aarch64-linux-gnu \
+          libc6-dev-arm64-cross \
+          python3 \
+          python3-pyelftools \
+          uuid-dev \
+          ccache  # 添加编译缓存工具
+
+      - name: Set up ccache
+        uses: actions/setup-ccache@v3
+        with:
+          max-size: 500M
+
+      - name: Get version tag
+        id: get_version_tag
+        shell: bash
+        run: echo "version=$(git describe --tags --always)" >> $GITHUB_OUTPUT
+
+      - name: Set up Secure Boot default keys
+        run: |
+          if [ ! -d "keys" ]; then
+            mkdir keys
+            openssl req -new -x509 -newkey rsa:2048 -subj "/CN=Rockchip Platform Key/" \
+              -keyout /dev/null -outform DER -out keys/pk.cer -days 7300 -nodes -sha256
+            curl -L https://go.microsoft.com/fwlink/?LinkId=321185 -o keys/ms_kek.cer
+            curl -L https://go.microsoft.com/fwlink/?linkid=321192 -o keys/ms_db1.cer
+            curl -L https://go.microsoft.com/fwlink/?linkid=321194 -o keys/ms_db2.cer
+            curl -L https://uefi.org/sites/default/files/resources/dbxupdate_arm64.bin -o keys/arm64_dbx.bin
+          fi
+
+      - name: Build platform
+        shell: bash
+        env:
+          CCACHE_DIR: /home/runner/.ccache
+          CCACHE_BASEDIR: ${{ github.workspace }}
+        run: |
+          # 设置并行编译（核心数*2）
+          THREADS=$(($(nproc) * 2))
+          
+          # 仅修改过的模块才重建
+          export BUILD_FLAGS="--skip-build-source $THREADS"
+
+          # 使用缓存设置
+          export EDK2_SECUREBOOT_FLAGS=" \
+              -D DEFAULT_KEYS=TRUE \
+              -D PK_DEFAULT_FILE=keys/pk.cer \
+              -D KEK_DEFAULT_FILE1=keys/ms_kek.cer \
+              -D DB_DEFAULT_FILE1=keys/ms_db1.cer \
+              -D DB_DEFAULT_FILE2=keys/ms_db2.cer \
+              -D DBX_DEFAULT_FILE1=keys/arm64_dbx.bin \
+              -D SECURE_BOOT_ENABLE=TRUE"
+
+          export EDK2_BUILD_FLAGS=" \
+              ${EDK2_SECUREBOOT_FLAGS} \
+              -n $THREADS"   # 传递并行编译参数
+
+          # 使用ccache加速编译
+          export CCACHE_PREFIX=distcc
+          export PATH="/usr/lib/ccache:$PATH"
+
+          ./build.sh --device ${{matrix.PLATFORM}} \
+                    --release ${{matrix.CONFIGURATION}} \
+                    --edk2-flags "${EDK2_BUILD_FLAGS}" \
+                    $BUILD_FLAGS
+          
+          mv RK3588_NOR_FLASH.img ${{matrix.PLATFORM}}_UEFI_${{matrix.CONFIGURATION}}_${{steps.get_version_tag.outputs.version}}.img
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{matrix.PLATFORM}} UEFI ${{matrix.CONFIGURATION}} image
+          path: ./*.img
+          if-no-files-found: error
