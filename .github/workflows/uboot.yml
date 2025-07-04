@@ -1,0 +1,70 @@
+name: Disassemble U-Boot
+
+on:
+  workflow_dispatch:
+    inputs:
+      uboot-url:
+        description: "URL to U-Boot image"
+        required: true
+        default: "https://example.com/path/to/uboot.img"
+jobs:
+  disassemble:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Setup environment
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y binwalk u-boot-tools python3-pip
+        pip3 install pyelftools capstone unicorn
+        
+    - name: Download U-Boot image
+      run: |
+        wget "${{ github.event.inputs.uboot-url || 'https://example.com/default/uboot.img' }}" -O uboot.img
+        
+    - name: Create output directory
+      run: mkdir -p output
+        
+    - name: Analyze with binwalk
+      run: |
+        binwalk uboot.img | tee output/binwalk.log
+        binwalk -eM uboot.img --directory output/binwalk_extracted
+        
+    - name: Extract FIT components
+      run: |
+        # List all components
+        dumpimage -l uboot.img > output/components.log
+        
+        # Extract all components
+        i=0
+        while dumpimage -T flat_dt -p $i -o output/component_$i.bin uboot.img 2>/dev/null
+        do
+          echo "Extracted component $i"
+          i=$((i+1))
+        done
+        
+    - name: Disassemble main U-Boot binary
+      run: |
+        # Find main U-Boot binary (usually the largest component)
+        largest_file=$(find output -type f -exec du -b {} + | sort -nr | head -n1 | cut -f2)
+        
+        # Use aarch64-linux-gnu-objdump for disassembly
+        sudo apt-get install -y binutils-aarch64-linux-gnu
+        aarch64-linux-gnu-objdump -D "$largest_file" > output/disassembly.s
+        
+        # Generate hexdump
+        hexdump -C "$largest_file" > output/hexdump.txt
+        
+    - name: Archive results
+      run: |
+        tar czvf uboot-analysis-$(date +%Y%m%d%H%M%S).tar.gz output/*
+        
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: uboot-analysis-results
+        path: |
+          output/*
+          *.tar.gz
